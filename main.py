@@ -10,7 +10,7 @@ from typecast import Typecast
 from typecast.models import TTSRequest
 
 # =====================
-# 환경 설정
+# ENV
 # =====================
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -19,7 +19,8 @@ TYPECAST_API_KEY = os.getenv("TYPECAST_API_KEY")
 TEXT_CHANNEL_ID = 1490313438683992194
 VOICE_CHANNEL_ID = 1488184603314225263
 
-FFMPEG_PATH = r"C:\Users\USER\Desktop\metabot\메타봇 pro\ffmpeg-8.1-essentials_build\bin\ffmpeg.exe"
+# Railway / Linux 대응 (로컬 경로 제거)
+FFMPEG_PATH = "ffmpeg"
 
 client = Typecast(api_key=TYPECAST_API_KEY)
 
@@ -33,7 +34,7 @@ intents.voice_states = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # =====================
-# JSON 로드/저장
+# JSON
 # =====================
 VOICE_FILE = "voices.json"
 PROFILE_FILE = "profiles.json"
@@ -52,7 +53,7 @@ voices = load_json(VOICE_FILE)
 profiles = load_json(PROFILE_FILE)
 
 # =====================
-# 프로필
+# PROFILE
 # =====================
 def get_profile(user_id):
     user_id = str(user_id)
@@ -72,12 +73,14 @@ def get_voice_id(profile):
     return voices.get(profile.get("voice"))
 
 # =====================
-# TTS 생성
+# TTS
 # =====================
 async def make_tts(text, voice_id):
     filename = f"tts_{uuid.uuid4().hex}.wav"
 
     try:
+        print("TTS 요청:", text)
+
         response = client.text_to_speech(
             TTSRequest(
                 text=text,
@@ -86,111 +89,104 @@ async def make_tts(text, voice_id):
             )
         )
 
+        if not response.audio_data:
+            print("❌ TTS 실패: audio_data 없음")
+            return None
+
         with open(filename, "wb") as f:
             f.write(response.audio_data)
 
+        print("✅ TTS 생성:", filename)
         return filename
 
     except Exception as e:
-        print("TTS 실패:", e)
+        print("❌ TTS ERROR:", e)
         return None
 
 # =====================
-# 음성 연결
+# VOICE
 # =====================
 vc_lock = asyncio.Lock()
 
 async def ensure_voice():
     async with vc_lock:
         channel = bot.get_channel(VOICE_CHANNEL_ID)
+
+        if not channel:
+            print("❌ voice channel 없음")
+            return None
+
         vc = discord.utils.get(bot.voice_clients, guild=channel.guild)
 
         if vc and vc.is_connected():
             return vc
 
-        return await channel.connect()
+        vc = await channel.connect()
+        print("🔊 voice connect 완료")
+
+        return vc
 
 # =====================
-# 큐 시스템
+# QUEUE
 # =====================
 queue = asyncio.Queue()
 
 async def worker():
+    print("🟢 worker 시작됨")
+
     while True:
         message, vc, profile = await queue.get()
 
         try:
+            print("📥 queue 받음:", message.content)
+
             voice_id = get_voice_id(profile)
+            print("🎤 voice_id:", voice_id)
 
             if not voice_id:
-                print("voice 없음")
+                print("❌ voice 없음")
+                queue.task_done()
                 continue
 
             file = await make_tts(message.content, voice_id)
 
-            if file:
-                vc.play(discord.FFmpegPCMAudio(file, executable=FFMPEG_PATH))
+            if file and vc and vc.is_connected():
+
+                print("▶ 재생 시작:", file)
+
+                audio = discord.FFmpegPCMAudio(file, executable=FFMPEG_PATH)
+
+                def after(err):
+                    if err:
+                        print("❌ PLAY ERROR:", err)
+                    else:
+                        print("✅ 재생 완료")
+
+                vc.play(audio, after=after)
 
                 while vc.is_playing():
                     await asyncio.sleep(0.2)
 
                 os.remove(file)
 
+            else:
+                print("❌ play 실패 (file or vc 문제)")
+
         except Exception as e:
-            print("worker error:", e)
+            print("❌ worker error:", e)
 
         queue.task_done()
 
 # =====================
-# 목록 포맷
-# =====================
-def range_text(arr):
-    return f"{arr[0]} ~ {arr[-1]}" if arr else "없음"
-
-def list_block():
-    man = sorted([k for k in voices if k.startswith("man")])
-    woman = sorted([k for k in voices if k.startswith("woman")])
-    boy = sorted([k for k in voices if k.startswith("boy")])
-    girl = sorted([k for k in voices if k.startswith("girl")])
-    grandpa = sorted([k for k in voices if k.startswith("grandpa")])
-    grandma = sorted([k for k in voices if k.startswith("grandma")])
-    etc = sorted([k for k in voices if k.startswith("etc")])
-
-    return "\n".join([
-        "🎤 보이스 목록",
-        "",
-        f"👨 남자 ({range_text(man)})",
-        f"👩 여자 ({range_text(woman)})",
-        f"🧒 남자아이 ({range_text(boy)})",
-        f"👧 여자아이 ({range_text(girl)})",
-        f"👴 할아버지 ({range_text(grandpa)})",
-        f"👵 할머니 ({range_text(grandma)})",
-        f"🤖 기타 ({range_text(etc)})"
-    ])
-
-# =====================
-# 명령어
+# CMD
 # =====================
 def handle_cmd(message):
     profile = get_profile(message.author.id)
     content = message.content.strip()
 
-    # =====================
-    # !tts
-    # =====================
     if content == "!tts":
-        return "\n".join([
-            "🎤 TTS 사용법",
-            "",
-            "👉 !tts 설정 (voice)",
-            "",
-            list_block()
-        ])
+        return "🎤 !tts 설정 (voice)\n\n보이스 목록은 voices.json"
 
-
-    # =====================
-    # !tts 설정
-    # =====================
     if content.startswith("!tts 설정"):
         key = content.replace("!tts 설정", "").strip()
 
@@ -199,12 +195,12 @@ def handle_cmd(message):
             save_profiles()
             return f"변경 완료: {key}"
 
-        return "없는 보이스입니다"
+        return "없는 보이스"
 
     return None
 
 # =====================
-# 메시지 처리
+# MESSAGE
 # =====================
 @bot.event
 async def on_message(message):
@@ -229,7 +225,7 @@ async def on_message(message):
     await queue.put((message, vc, profile))
 
 # =====================
-# 시작
+# START
 # =====================
 @bot.event
 async def on_ready():
