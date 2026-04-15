@@ -19,13 +19,12 @@ TYPECAST_API_KEY = os.getenv("TYPECAST_API_KEY")
 TEXT_CHANNEL_ID = 1490313438683992194
 VOICE_CHANNEL_ID = 1488184603314225263
 
-# Railway / Linux 대응 (로컬 경로 제거)
 FFMPEG_PATH = "ffmpeg"
 
 client = Typecast(api_key=TYPECAST_API_KEY)
 
 # =====================
-# Discord
+# BOT
 # =====================
 intents = discord.Intents.default()
 intents.message_content = True
@@ -79,7 +78,7 @@ async def make_tts(text, voice_id):
     filename = f"tts_{uuid.uuid4().hex}.wav"
 
     try:
-        print("TTS 요청:", text)
+        print("🟡 TTS 요청:", text)
 
         response = client.text_to_speech(
             TTSRequest(
@@ -90,13 +89,13 @@ async def make_tts(text, voice_id):
         )
 
         if not response.audio_data:
-            print("❌ TTS 실패: audio_data 없음")
+            print("❌ TTS 실패 (audio 없음)")
             return None
 
         with open(filename, "wb") as f:
             f.write(response.audio_data)
 
-        print("✅ TTS 생성:", filename)
+        print("🟢 TTS 생성 완료:", filename)
         return filename
 
     except Exception as e:
@@ -104,7 +103,7 @@ async def make_tts(text, voice_id):
         return None
 
 # =====================
-# VOICE
+# VOICE (핵심 안정화)
 # =====================
 vc_lock = asyncio.Lock()
 
@@ -118,11 +117,18 @@ async def ensure_voice():
 
         vc = discord.utils.get(bot.voice_clients, guild=channel.guild)
 
-        if vc and vc.is_connected():
-            return vc
+        # ❗ 죽은 vc 제거
+        if vc:
+            if not vc.is_connected():
+                try:
+                    await vc.disconnect()
+                except:
+                    pass
+                vc = None
 
-        vc = await channel.connect()
-        print("🔊 voice connect 완료")
+        if vc is None:
+            vc = await channel.connect()
+            print("🔊 voice 새 연결")
 
         return vc
 
@@ -132,17 +138,15 @@ async def ensure_voice():
 queue = asyncio.Queue()
 
 async def worker():
-    print("🟢 worker 시작됨")
+    print("🟢 worker 시작")
 
     while True:
-        message, vc, profile = await queue.get()
+        message, profile = await queue.get()
 
         try:
-            print("📥 queue 받음:", message.content)
+            print("📥 메시지:", message.content)
 
             voice_id = get_voice_id(profile)
-            print("🎤 voice_id:", voice_id)
-
             if not voice_id:
                 print("❌ voice 없음")
                 queue.task_done()
@@ -150,27 +154,40 @@ async def worker():
 
             file = await make_tts(message.content, voice_id)
 
-            if file and vc and vc.is_connected():
+            if not file:
+                queue.task_done()
+                continue
 
-                print("▶ 재생 시작:", file)
+            vc = await ensure_voice()
 
-                audio = discord.FFmpegPCMAudio(file, executable=FFMPEG_PATH)
+            if not vc or not vc.is_connected():
+                print("❌ voice 연결 실패")
+                queue.task_done()
+                continue
 
-                def after(err):
-                    if err:
-                        print("❌ PLAY ERROR:", err)
-                    else:
-                        print("✅ 재생 완료")
+            # 🔥 중요: 재생 전 죽은 상태 체크
+            if vc.is_playing():
+                vc.stop()
 
-                vc.play(audio, after=after)
+            print("▶ 재생 시작")
 
-                while vc.is_playing():
-                    await asyncio.sleep(0.2)
+            audio = discord.FFmpegPCMAudio(file, executable=FFMPEG_PATH)
 
+            def after(err):
+                if err:
+                    print("❌ PLAY ERROR:", err)
+                else:
+                    print("✅ 재생 완료")
+
+            vc.play(audio, after=after)
+
+            while vc.is_playing():
+                await asyncio.sleep(0.2)
+
+            try:
                 os.remove(file)
-
-            else:
-                print("❌ play 실패 (file or vc 문제)")
+            except:
+                pass
 
         except Exception as e:
             print("❌ worker error:", e)
@@ -185,7 +202,7 @@ def handle_cmd(message):
     content = message.content.strip()
 
     if content == "!tts":
-        return "🎤 !tts 설정 (voice)\n\n보이스 목록은 voices.json"
+        return "🎤 !tts 설정 (voice)"
 
     if content.startswith("!tts 설정"):
         key = content.replace("!tts 설정", "").strip()
@@ -216,13 +233,9 @@ async def on_message(message):
             await message.channel.send("✅ " + res)
         return
 
-    vc = await ensure_voice()
-    if not vc:
-        return
-
     profile = get_profile(message.author.id)
 
-    await queue.put((message, vc, profile))
+    await queue.put((message, profile))
 
 # =====================
 # START
